@@ -16,6 +16,7 @@
 # under the License.
 
 import argparse
+import glob
 import os
 import pkg_resources
 import shlex
@@ -42,6 +43,36 @@ class RequirementsList(object):
         self.reqs = {}
         self.failed = False
 
+    def _read_inner_dependecies(self, line, ignore_dups, strict):
+        if line.startswith('-r'):
+            r, path = line.split("-r ")
+            if os.path.exists(path):
+                self.read_requirements(path, ignore_dups, strict)
+                return True
+            else:
+                return False
+        else:
+            return False
+
+    def _register_requirements_with_validation(
+            self, requirement, strict, ignore_dups):
+        req = None
+        if strict:
+            req = pkg_resources.Requirement.parse(requirement)
+        else:
+            try:
+                req = pkg_resources.Requirement.parse(requirement)
+            except ValueError:
+                print("Ignoring unparseable requirement in non-strict "
+                      "mode: %s" % requirement)
+                pass
+        if (not ignore_dups and strict and req and req.project_name.lower()
+            in self.reqs):
+            print("Duplicate requirement in %s: %s" %
+                  (self.name, str(req)))
+            self.failed = True
+        self.reqs[req.project_name.lower()] = req
+
     def read_requirements(self, fn, ignore_dups=False, strict=False):
         """ Read a requirements file and optionally enforce style."""
         if not os.path.exists(fn):
@@ -56,21 +87,10 @@ class RequirementsList(object):
             if (not line or
                     line.startswith('http://tarballs.openstack.org/')):
                 continue
-            if strict:
-                req = pkg_resources.Requirement.parse(line)
-            else:
-                try:
-                    req = pkg_resources.Requirement.parse(line)
-                except ValueError:
-                    print("Ignoring unparseable requirement in non-strict "
-                          "mode: %s" % line)
-                    continue
-            if (not ignore_dups and strict and req.project_name.lower()
-                in self.reqs):
-                print("Duplicate requirement in %s: %s" %
-                      (self.name, str(req)))
-                self.failed = True
-            self.reqs[req.project_name.lower()] = req
+            if not self._read_inner_dependecies(line, ignore_dups, strict):
+                self._register_requirements_with_validation(
+                    line, strict, ignore_dups)
+                continue
 
     def read_all_requirements(self, global_req=False, include_dev=False,
                               strict=False):
@@ -90,12 +110,22 @@ class RequirementsList(object):
         if global_req:
             self.read_requirements('global-requirements.txt', strict=strict)
         else:
-            for fn in ['tools/pip-requires',
-                       'tools/test-requires',
-                       'requirements.txt',
-                       'test-requirements.txt'
-                       ]:
+            fns = ['tools/pip-requires',
+                   'tools/test-requires',
+                   'requirements.txt',
+                   'test-requirements.txt'
+                   ]
+            inner_fns = glob.glob('requirements.d/*.txt')
+            for fn in fns:
                 self.read_requirements(fn, strict=strict)
+            if os.path.exists('requirements.d') and os.path.isdir(
+                    'requirements.d'):
+                for fn in inner_fns:
+                    # Due to recursive invokation it may appear that inner
+                    # requirements were already registered, so that's the
+                    # reason to use ignore_dups as True,
+                    # but still leaving strict check
+                    self.read_requirements(fn, ignore_dups=True, strict=strict)
         if include_dev:
             self.read_requirements('dev-requirements.txt',
                                    ignore_dups=True, strict=strict)
